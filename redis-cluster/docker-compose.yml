@@ -11,6 +11,11 @@ services:
     container_name: redis-master-6379
     restart: "on-failure:5"
     logging: *default-logging
+    healthcheck:
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "mypass", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
     ports:
       - "6379:6379" # 宿主机端口:容器端口
     volumes:
@@ -38,6 +43,11 @@ services:
       - redis-master
     networks:
       - redis-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "mypass", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   # 从节点服务
   redis-slave-6380:
@@ -53,9 +63,15 @@ services:
       # - ./slave6378/log:/var/log/redis/
     command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
     depends_on:
-      - redis-master
+      redis-master:
+        condition: service_healthy # 只有 Master 健康后才启动 Slave
     networks:
       - redis-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "mypass", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   redis-sentinel-1:
     image: redis:8.0
@@ -64,9 +80,12 @@ services:
     logging: *default-logging
     command: ["redis-sentinel", "/usr/local/etc/redis/sentinel.conf"]
     depends_on:
-      - redis-master
-      - redis-slave-6378
-      - redis-slave-6380
+      redis-master:
+        condition: service_healthy # 只有 Master 健康后才启动
+      redis-slave-6378:
+        condition: service_healthy # 只有 slave-6378 健康后才启动
+      redis-slave-6380:
+        condition: service_healthy # 只有 slave-6380 健康后才启动
     ports:
       - "26379:26379"
     volumes:
@@ -81,9 +100,12 @@ services:
     logging: *default-logging
     command: ["redis-sentinel", "/usr/local/etc/redis/sentinel.conf"]
     depends_on:
-      - redis-master
-      - redis-slave-6378
-      - redis-slave-6380
+      redis-master:
+        condition: service_healthy # 只有 Master 健康后才启动
+      redis-slave-6378:
+        condition: service_healthy # 只有 slave-6378 健康后才启动
+      redis-slave-6380:
+        condition: service_healthy # 只有 slave-6380 健康后才启动
     ports:
       - "26380:26379"
     volumes:
@@ -98,9 +120,12 @@ services:
     logging: *default-logging
     command: ["redis-sentinel", "/usr/local/etc/redis/sentinel.conf"]
     depends_on:
-      - redis-master
-      - redis-slave-6378
-      - redis-slave-6380
+      redis-master:
+        condition: service_healthy # 只有 Master 健康后才启动
+      redis-slave-6378:
+        condition: service_healthy # 只有 slave-6378 健康后才启动
+      redis-slave-6380:
+        condition: service_healthy # 只有 slave-6380 健康后才启动
     ports:
       - "26381:26379"
     volumes:

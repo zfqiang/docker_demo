@@ -1,3 +1,28 @@
+# 验证步骤
+
+# 必须先 down 再 up,挂载方式变了要重建容器
+
+docker compose down
+docker compose up -d
+docker compose ps # 6 个容器应全部 Up
+
+# 哨兵视角确认主从
+
+docker exec redis-sentinel-1 redis-cli -p 26379 sentinel get-master-addr-by-name mymaster
+
+# 应返回: 1) "redis-master" 2) "6379"
+
+# 主从状态
+
+docker exec redis-master-6379 redis-cli -a mypass info replication
+
+docker stop redis-master-6379
+
+# 等 ~10 秒(down-after 5s + 选举),换一个哨兵查,会看到新主 IP
+
+docker exec redis-sentinel-1 redis-cli -p 26379 sentinel get-master-addr-by-name mymaster
+docker start redis-master-6379 # 旧主会自动降级为 slave
+
 # 准备目录和配置文件
 
 mkdir -p /data/redis/conf
