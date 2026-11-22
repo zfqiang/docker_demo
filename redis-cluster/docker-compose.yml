@@ -18,19 +18,34 @@ services:
   # 从节点服务
   redis-slave:
     image: redis:8.0
-    container_name: redis-slave
+    container_name: redis-slave-6378
     restart: always
     ports:
       - "6378:6379" # 宿主机端口 6378 映射到容器 6379
     volumes:
-      - ./redis-cluster/slave/conf/redis.conf:/usr/local/etc/redis/redis.conf
-      - ./redis-cluster/slave/data:/data
+      - ./redis-cluster/slave6378/conf/redis.conf:/usr/local/etc/redis/redis.conf
+      - ./redis-cluster/slave6378/data:/data
     command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
     depends_on:
       - redis-master
     networks:
       - redis-net
 
+  # 从节点服务
+  redis-slave:
+    image: redis:8.0
+    container_name: redis-slave-6380
+    restart: always
+    ports:
+      - "6380:6379" # 宿主机端口 6380 映射到容器 6379
+    volumes:
+      - ./redis-cluster/slave6380/conf/redis.conf:/usr/local/etc/redis/redis.conf
+      - ./redis-cluster/slave6380/data:/data
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    depends_on:
+      - redis-master
+    networks:
+      - redis-net
 networks:
   redis-net:
     driver: bridge
