@@ -1,16 +1,34 @@
+# =============================================================================
+# Redis 高可用主从哨兵集群 Docker Compose 编排文件
+#
+# 架构说明：
+#   - 1 个 Master 节点（端口 6379）
+#   - 2 个 Slave 节点（端口 6378、6380）
+#   - 3 个 Sentinel 哨兵节点（端口 26379、26380、26381）
+#
+# 所有节点运行在自定义 bridge 网络 redis-net 中，
+# 通过 healthcheck 机制保证启动顺序：Master 健康 → Slave 健康 → Sentinel 启动。
+# 使用 YAML 锚点 &default-logging 统一管理所有服务的日志轮转策略。
+# =============================================================================
+
+# 定义日志配置锚点，供所有 service 复用，限制单个日志文件最大 10MB，最多保留 3 个文件
 x-logging: &default-logging
   driver: local
   options:
     max-size: "10m"
     max-file: "3"
 
+# 服务定义：包含 Redis 主节点、从节点和哨兵节点
 services:
   # 主节点服务 线上测试redis-master一定要换成IP地址，不然哨兵可能解释不到主节点。
+  # Redis 主节点，负责处理所有写操作，通过 redis.conf 配置文件启动，
+  # 配置了 healthcheck 供 Slave 和 Sentinel 判断其健康状态。
   redis-master:
     image: redis:8.0
     container_name: redis-master-6379
     restart: "on-failure:5"
     logging: *default-logging
+    # 健康检查：使用 redis-cli 执行 ping 命令验证服务可用性，每 5 秒检测一次，最多重试 5 次
     healthcheck:
       test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "mypass", "ping"]
       interval: 5s
@@ -27,6 +45,8 @@ services:
       - redis-net
 
   # 从节点服务
+  # 从节点 1（宿主机端口 6378），通过 depends_on 简单列表方式依赖 Master 启动，
+  # 不要求 Master 健康，只要求 Master 容器已启动即可。
   redis-slave-6378:
     image: redis:8.0
     container_name: redis-slave-6378
@@ -50,6 +70,8 @@ services:
       retries: 5
 
   # 从节点服务
+  # 从节点 2（宿主机端口 6380），使用 condition: service_healthy 严格依赖 Master 健康状态，
+  # 确保数据复制源已就绪后再启动同步。
   redis-slave-6380:
     image: redis:8.0
     container_name: redis-slave-6380
@@ -73,12 +95,16 @@ services:
       timeout: 5s
       retries: 5
 
+  # 哨兵节点 1（宿主机端口 26379）
+  # 负责监控 Master/Slave 状态，当 Master 故障时自动执行故障转移（Failover）。
+  # 三个哨兵节点部署保证哨兵集群自身的 quorum 投票可靠性。
   redis-sentinel-1:
     image: redis:8.0
     container_name: redis-sentinel-1
     restart: "on-failure:5"
     logging: *default-logging
     command: ["redis-sentinel", "/usr/local/etc/redis/sentinel.conf"]
+    # 哨兵必须在所有数据节点（Master + Slave）健康后才启动
     depends_on:
       redis-master:
         condition: service_healthy # 只有 Master 健康后才启动
@@ -93,6 +119,8 @@ services:
     networks:
       - redis-net
 
+  # 哨兵节点 2（宿主机端口 26380）
+  # 与 sentinel-1 配置一致，端口和挂载目录不同，用于哨兵集群多节点选举。
   redis-sentinel-2:
     image: redis:8.0
     container_name: redis-sentinel-2
@@ -113,6 +141,8 @@ services:
     networks:
       - redis-net
 
+  # 哨兵节点 3（宿主机端口 26381）
+  # 哨兵集群第三个节点，与另外两个哨兵共同完成故障检测和自动故障转移的多数票决策。
   redis-sentinel-3:
     image: redis:8.0
     container_name: redis-sentinel-3
@@ -133,6 +163,7 @@ services:
     networks:
       - redis-net
 
+# 自定义网络配置：所有 Redis 节点通过 bridge 网络互通，容器间可通过服务名解析访问
 networks:
   redis-net:
     driver: bridge

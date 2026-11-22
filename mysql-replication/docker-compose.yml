@@ -1,0 +1,99 @@
+# MySQL 主从复制 Docker Compose 编排文件
+# 功能：基于 MySQL 8.0 搭建一主一从的异步复制环境
+# 架构：mysql-master（主库，端口3307） + mysql-slave（从库，端口3308）
+# 网络：通过自定义 bridge 网络实现容器间通信
+
+# 日志配置锚点：定义统一的本地日志驱动参数，供各服务通过 *default-logging 引用
+# 参数说明：
+#   driver   - 日志驱动类型，local 表示使用 Docker 本地日志文件存储
+#   max-size - 单个日志文件最大容量，超限后自动轮转（10m = 10MB）
+#   max-file - 保留的最大日志文件数量，防止磁盘空间无限增长
+x-logging: &default-logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# MySQL 健康检查锚点：定义统一的健康检测策略，供主从服务通过 *mysql-healthcheck 引用
+# 检测方式：通过 mysqladmin ping 命令验证 MySQL 进程是否可正常响应
+# 参数说明：
+#   test         - 检测命令，使用 CMD-SHELL 在容器内执行 mysqladmin ping
+#   interval     - 健康检查执行间隔（10秒）
+#   timeout      - 单次检查超时时间（5秒）
+#   retries      - 连续失败次数达到该阈值后将容器标记为 unhealthy
+#   start_period - 首次初始化可能较慢，启动后 10 分钟内的探测失败不计入重试次数
+x-mysql-healthcheck: &mysql-healthcheck
+  test:
+    - CMD-SHELL
+    - 'mysqladmin --no-defaults ping --host=127.0.0.1 --user=root --password="$${MYSQL_ROOT_PASSWORD}" --silent'
+  interval: 10s
+  timeout: 5s
+  retries: 10
+  start_period: 10m
+
+# 服务定义区域：包含主库与从库两个 MySQL 实例
+services:
+  # 主库服务：作为复制源，负责写入操作并将从库需要同步的 binlog 提供给从库
+  # 宿主机端口映射：3307 -> 容器3306
+  # 关键配置：
+  #   MYSQL_ROOT_PASSWORD - root 用户密码
+  #   MYSQL_DATABASE      - 初始化时自动创建的数据库
+  #   volumes             - 挂载自定义配置文件 my.cnf（启用 binlog 等复制参数）和数据持久化目录
+  mysql-master:
+    image: mysql:8.0
+    container_name: mysql-master
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      MYSQL_ROOT_PASSWORD: Root@123456
+      MYSQL_DATABASE: test_db
+    healthcheck: *mysql-healthcheck
+    command:
+      - --server-id=101
+      - --log-bin=mysql-bin
+      - --binlog-format=ROW
+      - --binlog-ignore-db=mysql
+      - --binlog-ignore-db=information_schema
+      - --binlog-ignore-db=performance_schema
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "3307:3306" # 宿主机3307映射到容器3306
+    volumes:
+      - ./master/data:/var/lib/mysql
+    networks:
+      - mysql-net
+
+  # 从库服务：作为复制目标，通过 IO 线程拉取主库 binlog 并由 SQL 线程回放
+  # 宿主机端口映射：3308 -> 容器3306
+  # 启动依赖：依赖主库健康检查通过后才会启动，确保 binlog 可用
+  # depends_on 条件 service_healthy 保证从库启动时主库已完全就绪
+  mysql-slave:
+    image: mysql:8.0
+    container_name: mysql-slave
+    # restart: unless-stopped
+    logging: *default-logging
+    environment:
+      MYSQL_ROOT_PASSWORD: Root@123456
+    healthcheck: *mysql-healthcheck
+    command:
+      - --server-id=102
+      - --relay-log=mysql-relay-bin
+      - --read-only=ON
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "3308:3306" # 宿主机3308映射到容器3306
+    volumes:
+      - ./slave/data:/var/lib/mysql
+    depends_on:
+      mysql-master:
+        condition: service_healthy
+    networks:
+      - mysql-net
+
+# 网络定义区域：创建自定义 bridge 网络，隔离主从容器通信
+# mysql-net 使主从容器可通过容器名（mysql-master / mysql-slave）互相解析
+networks:
+  mysql-net:
+    driver: bridge
