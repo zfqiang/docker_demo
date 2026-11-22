@@ -9,8 +9,8 @@ services:
     ports:
       - "6379:6379" # 宿主机端口:容器端口
     volumes:
-      - D:/Docker/docker_volumn/redis-cluster/master/conf/redis.conf:/usr/local/etc/redis/redis.conf
-      - D:/Docker/docker_volumn/redis-cluster/master/data:/data
+      - ./redis-cluster/master/conf/redis.conf:/usr/local/etc/redis/redis.conf
+      - ./redis-cluster/master/data:/data
     command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
     networks:
       - redis-net
@@ -23,8 +23,8 @@ services:
     ports:
       - "6378:6379" # 宿主机端口 6378 映射到容器 6379
     volumes:
-      - D:/Docker/docker_volumn/redis-cluster/slave/conf/redis.conf:/usr/local/etc/redis/redis.conf
-      - D:/Docker/docker_volumn/redis-cluster/slave/data:/data
+      - ./redis-cluster/slave/conf/redis.conf:/usr/local/etc/redis/redis.conf
+      - ./redis-cluster/slave/data:/data
     command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
     depends_on:
       - redis-master
