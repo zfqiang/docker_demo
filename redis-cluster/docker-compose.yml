@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  # 主节点服务
+  redis-master:
+    image: redis:8.0
+    container_name: redis-master
+    restart: always
+    ports:
+      - "6379:6379" # 宿主机端口:容器端口
+    volumes:
+      - D:/Docker/docker_volumn/redis-cluster/master/conf/redis.conf:/usr/local/etc/redis/redis.conf
+      - D:/Docker/docker_volumn/redis-cluster/master/data:/data
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    networks:
+      - redis-net
+
+  # 从节点服务
+  redis-slave:
+    image: redis:8.0
+    container_name: redis-slave
+    restart: always
+    ports:
+      - "6378:6379" # 宿主机端口 6378 映射到容器 6379
+    volumes:
+      - D:/Docker/docker_volumn/redis-cluster/slave/conf/redis.conf:/usr/local/etc/redis/redis.conf
+      - D:/Docker/docker_volumn/redis-cluster/slave/data:/data
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    depends_on:
+      - redis-master
+    networks:
+      - redis-net
+
+networks:
+  redis-net:
+    driver: bridge
