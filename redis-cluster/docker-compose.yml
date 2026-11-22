@@ -1,13 +1,20 @@
+x-logging: &default-logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   # 主节点服务
   redis-master:
     image: redis:8.0
     container_name: redis-master-6379
-    restart: always
+    restart: "on-failure:5"
+    logging: *default-logging
     ports:
       - "6379:6379" # 宿主机端口:容器端口
     volumes:
-      - ./master/conf/redis.conf:/usr/local/etc/redis/redis.conf
+      - ./master/conf:/usr/local/etc/redis
       - ./master/data:/data
       # - ./master/log:/var/log/redis/  使用docker log 查看日志
     command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
@@ -18,11 +25,12 @@ services:
   redis-slave-6378:
     image: redis:8.0
     container_name: redis-slave-6378
-    restart: always
+    restart: "on-failure:5"
+    logging: *default-logging
     ports:
       - "6378:6379" # 宿主机端口 6378 映射到容器 6379
     volumes:
-      - ./slave6378/conf/redis.conf:/usr/local/etc/redis/redis.conf
+      - ./slave6378/conf:/usr/local/etc/redis
       - ./slave6378/data:/data
       # - ./slave6378/log:/var/log/redis/
     command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
@@ -35,11 +43,12 @@ services:
   redis-slave-6380:
     image: redis:8.0
     container_name: redis-slave-6380
-    restart: always
+    restart: "on-failure:5"
+    logging: *default-logging
     ports:
       - "6380:6379" # 宿主机端口 6380 映射到容器 6379
     volumes:
-      - ./slave6380/conf/redis.conf:/usr/local/etc/redis/redis.conf
+      - ./slave6380/conf:/usr/local/etc/redis
       - ./slave6380/data:/data
       # - ./slave6378/log:/var/log/redis/
     command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
@@ -51,7 +60,8 @@ services:
   redis-sentinel-1:
     image: redis:8.0
     container_name: redis-sentinel-1
-    restart: always
+    restart: "on-failure:5"
+    logging: *default-logging
     command: ["redis-sentinel", "/usr/local/etc/redis/sentinel.conf"]
     depends_on:
       - redis-master
@@ -60,14 +70,15 @@ services:
     ports:
       - "26379:26379"
     volumes:
-      - ./sentinel/sentinel1/sentinel.conf:/usr/local/etc/redis/sentinel.conf
+      - ./sentinel/sentinel1:/usr/local/etc/redis
     networks:
       - redis-net
 
   redis-sentinel-2:
     image: redis:8.0
     container_name: redis-sentinel-2
-    restart: always
+    restart: "on-failure:5"
+    logging: *default-logging
     command: ["redis-sentinel", "/usr/local/etc/redis/sentinel.conf"]
     depends_on:
       - redis-master
@@ -76,14 +87,15 @@ services:
     ports:
       - "26380:26379"
     volumes:
-      - ./sentinel/sentinel2/sentinel.conf:/usr/local/etc/redis/sentinel.conf
+      - ./sentinel/sentinel2:/usr/local/etc/redis
     networks:
       - redis-net
 
   redis-sentinel-3:
     image: redis:8.0
     container_name: redis-sentinel-3
-    restart: always
+    restart: "on-failure:5"
+    logging: *default-logging
     command: ["redis-sentinel", "/usr/local/etc/redis/sentinel.conf"]
     depends_on:
       - redis-master
@@ -92,7 +104,7 @@ services:
     ports:
       - "26381:26379"
     volumes:
-      - ./sentinel/sentinel3/sentinel.conf:/usr/local/etc/redis/sentinel.conf
+      - ./sentinel/sentinel3:/usr/local/etc/redis
     networks:
       - redis-net
 
