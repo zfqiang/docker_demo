@@ -11,7 +11,7 @@ services:
     volumes:
       - ./master/conf/redis.conf:/usr/local/etc/redis/redis.conf
       - ./master/data:/data
-      - ./master/log:/var/log/redis/log
+      - ./master/log:/var/log/redis/
     command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
     networks:
       - redis-net
@@ -26,6 +26,7 @@ services:
     volumes:
       - ./slave6378/conf/redis.conf:/usr/local/etc/redis/redis.conf
       - ./slave6378/data:/data
+      - ./slave6378/log:/var/log/redis/
     command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
     depends_on:
       - redis-master
@@ -42,6 +43,7 @@ services:
     volumes:
       - ./slave6380/conf/redis.conf:/usr/local/etc/redis/redis.conf
       - ./slave6380/data:/data
+      - ./slave6378/log:/var/log/redis/
     command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
     depends_on:
       - redis-master
