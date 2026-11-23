@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package order;
+option go_package = "github.com/zfqiang/payment-system/rpc/order";
+
+service OrderService {
+  // Payment service calls this before creating a payment to verify ownership and payable amount.
+  rpc GetPayableOrder(GetPayableOrderRequest) returns (PayableOrder);
+  // Consumers must make this operation idempotent by payment_no/event_id.
+  rpc MarkOrderPaid(MarkOrderPaidRequest) returns (MarkOrderPaidResponse);
+}
+
+message GetPayableOrderRequest {
+  string order_id = 1;
+  string user_id = 2;
+}
+
+message PayableOrder {
+  string order_id = 1;
+  string user_id = 2;
+  int64 payable_amount = 3;
+  string currency = 4;
+  string status = 5;
+}
+
+message MarkOrderPaidRequest {
+  string event_id = 1;
+  string payment_no = 2;
+  string order_id = 3;
+  string user_id = 4;
+  int64 amount = 5;
+  string currency = 6;
+  int64 paid_at_unix_milli = 7;
+  string trace_id = 8;
+}
+
+message MarkOrderPaidResponse {
+  bool updated = 1;
+}

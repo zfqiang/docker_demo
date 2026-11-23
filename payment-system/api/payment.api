@@ -1,0 +1,46 @@
+syntax = "v1"
+
+info (
+  title: "Payment API"
+  desc: "支付服务 API"
+  version: "v1"
+)
+
+type CreatePaymentRequest {
+  OrderID string `json:"orderId"`
+  Amount int64 `json:"amount"`
+  Currency string `json:"currency,optional"`
+  Method string `json:"method"`
+}
+
+type PaymentResponse {
+  PaymentNo string `json:"paymentNo"`
+  OrderID string `json:"orderId"`
+  Amount int64 `json:"amount"`
+  Currency string `json:"currency"`
+  Method string `json:"method"`
+  Status string `json:"status"`
+  PayURL string `json:"payUrl,optional"`
+  CreatedAt string `json:"createdAt"`
+}
+
+type CallbackRequest {
+  PaymentNo string `json:"paymentNo"`
+  TradeNo string `json:"tradeNo"`
+  Result string `json:"result"`
+}
+
+@server (
+  prefix: /v1
+  group: payment
+)
+service payment-api {
+  @handler CreatePayment
+  post /payments (CreatePaymentRequest) returns (PaymentResponse)
+
+  @handler GetPayment
+  get /payments/:paymentNo returns (PaymentResponse)
+
+  @handler PaymentCallback
+  post /callbacks/:channel (CallbackRequest)
+}

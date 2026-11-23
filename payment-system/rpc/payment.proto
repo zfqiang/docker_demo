@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package payment;
+option go_package = "github.com/zfqiang/payment-system/rpc/payment";
+
+service PaymentService {
+  rpc CreatePayment(CreatePaymentRequest) returns (Payment);
+  rpc GetPayment(GetPaymentRequest) returns (Payment);
+  rpc ClosePayment(ClosePaymentRequest) returns (Payment);
+}
+
+message CreatePaymentRequest {
+  string order_id = 1;
+  string user_id = 2;
+  int64 amount = 3;
+  string currency = 4;
+  string method = 5;
+}
+
+message GetPaymentRequest { string payment_no = 1; }
+message ClosePaymentRequest { string payment_no = 1; }
+message Payment {
+  string payment_no = 1;
+  string order_id = 2;
+  string user_id = 3;
+  int64 amount = 4;
+  string currency = 5;
+  string method = 6;
+  string status = 7;
+}
