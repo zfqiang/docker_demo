@@ -1,0 +1,399 @@
+openapi: 3.1.0
+info:
+  title: Payment API
+  description: 支付服务 REST API。除健康检查、指标和渠道回调外，接口均返回统一 JSON 响应信封。
+  version: 1.0.0
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: http://localhost:8080
+    description: 本地开发环境
+
+tags:
+  - name: System
+    description: 存活检查与指标
+  - name: Payments
+    description: 支付单创建与查询
+  - name: Callbacks
+    description: 支付渠道回调
+
+paths:
+  /healthz:
+    get:
+      tags: [System]
+      summary: 存活检查
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: 服务进程正常
+          headers:
+            X-Trace-ID:
+              $ref: "#/components/headers/TraceId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+
+  /metrics:
+    get:
+      tags: [System]
+      summary: Prometheus 指标
+      operationId: getMetrics
+      security: []
+      responses:
+        "200":
+          description: Prometheus 文本格式指标
+          headers:
+            X-Trace-ID:
+              $ref: "#/components/headers/TraceId"
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                # HELP payment_http_requests_total Total HTTP requests handled by payment service.
+                # TYPE payment_http_requests_total counter
+                payment_http_requests_total 12
+
+  /v1/payments:
+    post:
+      tags: [Payments]
+      summary: 创建支付单
+      description: |-
+        创建一个支付单。orderId 在同一用户下充当幂等键；相同订单、金额、币种和支付方式的重复请求复用原支付单。
+      operationId: createPayment
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePaymentRequest"
+            example:
+              orderId: order-1001
+              amount: 1299
+              currency: CNY
+              method: alipay
+      responses:
+        "201":
+          description: 支付单创建成功
+          headers:
+            X-Trace-ID:
+              $ref: "#/components/headers/TraceId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Payment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/payments/{paymentNo}:
+    get:
+      tags: [Payments]
+      summary: 查询支付单
+      description: 只能查询当前 JWT 用户拥有的支付单。
+      operationId: getPayment
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PaymentNo"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: 查询成功
+          headers:
+            X-Trace-ID:
+              $ref: "#/components/headers/TraceId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Payment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/callbacks/{channel}:
+    post:
+      tags: [Callbacks]
+      summary: 接收支付渠道回调
+      description: |-
+        根据原始 JSON 请求体使用 CALLBACK_SECRET 计算 HMAC-SHA256，签名放入
+        X-Callback-Signature 请求头。signature 使用小写十六进制字符串。
+      operationId: paymentCallback
+      security: []
+      parameters:
+        - name: channel
+          in: path
+          required: true
+          description: 支付渠道
+          schema:
+            type: string
+            enum: [alipay, wechat]
+        - name: X-Callback-Signature
+          in: header
+          required: true
+          description: 原始请求体的 HMAC-SHA256 十六进制签名
+          schema:
+            type: string
+            pattern: "^[0-9a-fA-F]{64}$"
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CallbackRequest"
+            example:
+              paymentNo: P202611230001demo
+              tradeNo: mock-trade-1
+              result: success
+      responses:
+        "200":
+          description: 回调处理成功
+          headers:
+            X-Trace-ID:
+              $ref: "#/components/headers/TraceId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Payment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/InvalidSignature"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Retry"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    PaymentNo:
+      name: paymentNo
+      in: path
+      required: true
+      description: 支付流水号
+      schema:
+        type: string
+        minLength: 1
+    TraceId:
+      name: X-Trace-ID
+      in: header
+      required: false
+      description: 可选链路标识；未提供或长度超过 128 时由服务生成
+      schema:
+        type: string
+        maxLength: 128
+
+  headers:
+    TraceId:
+      description: 请求链路标识
+      required: true
+      schema:
+        type: string
+
+  schemas:
+    Envelope:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        message:
+          type: string
+          description: 用户可读结果或错误信息
+        data:
+          description: 成功时返回的数据；错误响应通常省略
+
+    ErrorCode:
+      type: string
+      enum:
+        - OK
+        - INVALID_ARGUMENT
+        - INVALID_SIGNATURE
+        - UNAUTHORIZED
+        - FORBIDDEN
+        - NOT_FOUND
+        - RETRY
+        - INTERNAL
+
+    CreatePaymentRequest:
+      type: object
+      required: [orderId, amount, method]
+      additionalProperties: false
+      properties:
+        orderId:
+          type: string
+          minLength: 1
+          description: 关联订单号
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: 最小货币单位金额，例如人民币分
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+          default: CNY
+          description: 三字符货币代码；省略时为 CNY
+        method:
+          type: string
+          enum: [alipay, wechat]
+          description: 支付方式及渠道
+
+    CallbackRequest:
+      type: object
+      required: [paymentNo, tradeNo, result]
+      additionalProperties: false
+      properties:
+        paymentNo:
+          type: string
+          minLength: 1
+        tradeNo:
+          type: string
+          description: 渠道交易号
+        result:
+          type: string
+          enum: [success, failed]
+
+    Payment:
+      type: object
+      required:
+        [paymentNo, orderId, amount, currency, method, status, createdAt]
+      properties:
+        paymentNo:
+          type: string
+        orderId:
+          type: string
+        amount:
+          type: integer
+          format: int64
+          description: 最小货币单位金额
+        currency:
+          type: string
+          example: CNY
+        method:
+          type: string
+          enum: [alipay, wechat]
+        status:
+          type: string
+          enum: [pending, success, failed, closed]
+        payUrl:
+          type: string
+          format: uri
+          description: 创建支付时返回的渠道演示地址
+        createdAt:
+          type: string
+          format: date-time
+
+    ErrorResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [code, message]
+
+  responses:
+    BadRequest:
+      description: 请求格式无效、参数不合法或状态转换非法
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: INVALID_ARGUMENT
+            message: invalid payment request
+    Unauthorized:
+      description: 缺少或无效的 Bearer JWT
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: UNAUTHORIZED
+            message: bearer token is required
+    Forbidden:
+      description: 支付单不属于当前用户
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: FORBIDDEN
+            message: payment does not belong to current user
+    NotFound:
+      description: 支付单不存在
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: NOT_FOUND
+            message: payment not found
+    InvalidSignature:
+      description: 回调签名缺失、格式错误或验签失败
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: INVALID_SIGNATURE
+            message: invalid provider callback signature
+    Retry:
+      description: 同一回调正在并发处理，请稍后重试
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: RETRY
+            message: payment callback is being processed
+    InternalError:
+      description: 服务内部错误
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: INTERNAL
+            message: internal server error

@@ -1,6 +1,8 @@
 package config
 
-import "os"
+import (
+	"os"
+)
 
 // Config 汇总支付 API 和 Worker 所需的外部连接、密钥及服务地址配置。
 type Config struct {

@@ -2,16 +2,17 @@ package repository
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/zfqiang/payment-system/internal/model"
+	gormmysql "gorm.io/driver/mysql"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var ErrNotFound = errors.New("payment not found")
@@ -27,44 +28,100 @@ type Store interface {
 	ReleaseOutbox(context.Context, *model.OutboxMessage, error) error
 }
 
-// MySQL 封装数据库连接池，保证业务代码不直接处理 SQL 驱动细节。
+// MySQL 封装 GORM 数据库连接，供支付业务和 Outbox Worker 复用。
 type MySQL struct {
-	db *sql.DB
+	db *gorm.DB
 }
 
+// paymentRow 将数据库列映射为 GORM 持久化模型，与对外 API 模型分离。
+type paymentRow struct {
+	ID              uint64     `gorm:"column:id;primaryKey"`
+	PaymentNo       string     `gorm:"column:payment_no"`
+	OrderID         string     `gorm:"column:order_id"`
+	UserID          string     `gorm:"column:user_id"`
+	Amount          int64      `gorm:"column:amount"`
+	Currency        string     `gorm:"column:currency"`
+	Method          string     `gorm:"column:method"`
+	Status          string     `gorm:"column:status"`
+	ProviderTradeNo *string    `gorm:"column:provider_trade_no"`
+	CallbackAt      *time.Time `gorm:"column:callback_at"`
+	CreatedAt       time.Time  `gorm:"column:created_at"`
+}
+
+func (paymentRow) TableName() string { return "payments" }
+
+// outboxRow 映射支付成功事件表；Payload 对应 MySQL JSON 列。
+type outboxRow struct {
+	ID           uint64     `gorm:"column:id;primaryKey"`
+	EventKey     string     `gorm:"column:event_key"`
+	PaymentNo    string     `gorm:"column:payment_no"`
+	Payload      []byte     `gorm:"column:payload"`
+	Status       string     `gorm:"column:status"`
+	Attempts     uint32     `gorm:"column:attempts"`
+	ClaimToken   *string    `gorm:"column:claim_token"`
+	ClaimedUntil *time.Time `gorm:"column:claimed_until"`
+	LastError    *string    `gorm:"column:last_error"`
+	CreatedAt    time.Time  `gorm:"column:created_at"`
+	QueuedAt     *time.Time `gorm:"column:queued_at"`
+}
+
+func (outboxRow) TableName() string { return "payment_outbox" }
+
+// OpenMySQL 使用 GORM MySQL Dialector 建立连接，并在返回前检查数据库可用性。
 func OpenMySQL(ctx context.Context, dsn string) (*MySQL, error) {
-	// 配置连接池并 PingContext 确认启动时数据库已可用。
-	db, err := sql.Open("mysql", dsn)
+	fmt.Println(dsn)
+	db, err := gorm.Open(gormmysql.New(gormmysql.Config{
+		DSN:                       dsn,
+		SkipInitializeWithVersion: true,
+	}), &gorm.Config{
+		DisableAutomaticPing: true,
+		TranslateError:       true,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("open mysql: %w", err)
+		return nil, fmt.Errorf("open mysql with gorm: %w", err)
 	}
-	db.SetMaxOpenConns(30)
-	db.SetMaxIdleConns(10)
-	db.SetConnMaxLifetime(5 * time.Minute)
-	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("get mysql connection pool: %w", err)
+	}
+	sqlDB.SetMaxOpenConns(30)
+	sqlDB.SetMaxIdleConns(10)
+	sqlDB.SetConnMaxLifetime(5 * time.Minute)
+	if err := sqlDB.PingContext(ctx); err != nil {
+		_ = sqlDB.Close()
 		return nil, fmt.Errorf("ping mysql: %w", err)
 	}
 	return &MySQL{db: db}, nil
 }
 
-func (m *MySQL) Close() error { return m.db.Close() }
+// Close 关闭 GORM 底层的 database/sql 连接池。
+func (m *MySQL) Close() error {
+	db, err := m.db.DB()
+	if err != nil {
+		return fmt.Errorf("get mysql connection pool: %w", err)
+	}
+	return db.Close()
+}
 
 func (m *MySQL) CreatePayment(ctx context.Context, p *model.Payment) (*model.Payment, error) {
 	// 订单号唯一约束充当幂等键；重复请求只在支付参数完全一致时复用原支付单。
-	_, err := m.db.ExecContext(ctx, `INSERT INTO payments
-		(payment_no, order_id, user_id, amount, currency, method, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		p.PaymentNo, p.OrderID, p.UserID, p.Amount, p.Currency, p.Method, model.StatusPending)
-	if err == nil {
-		return m.GetPayment(ctx, p.PaymentNo)
+	row := paymentRow{
+		PaymentNo: p.PaymentNo,
+		OrderID:   p.OrderID,
+		UserID:    p.UserID,
+		Amount:    p.Amount,
+		Currency:  p.Currency,
+		Method:    p.Method,
+		Status:    model.StatusPending,
 	}
-	var mysqlErr *mysql.MySQLError
-	if !errors.As(err, &mysqlErr) || mysqlErr.Number != 1062 {
+	if err := m.db.WithContext(ctx).Create(&row).Error; err == nil {
+		return m.GetPayment(ctx, p.PaymentNo)
+	} else if !errors.Is(err, gorm.ErrDuplicatedKey) {
 		return nil, fmt.Errorf("insert payment: %w", err)
 	}
-	existing, getErr := m.getPaymentByOrder(ctx, p.OrderID)
-	if getErr != nil {
+
+	existing, err := m.getPaymentByOrder(ctx, p.OrderID)
+	if err != nil {
 		return nil, fmt.Errorf("insert payment: %w", err)
 	}
 	if existing.UserID != p.UserID || existing.Amount != p.Amount ||
@@ -75,171 +132,198 @@ func (m *MySQL) CreatePayment(ctx context.Context, p *model.Payment) (*model.Pay
 }
 
 func (m *MySQL) GetPayment(ctx context.Context, paymentNo string) (*model.Payment, error) {
-	p := new(model.Payment)
-	var tradeNo sql.NullString
-	var callbackAt sql.NullTime
-	err := m.db.QueryRowContext(ctx, `SELECT payment_no, order_id, user_id, amount,
-		currency, method, status, provider_trade_no, callback_at, created_at
-		FROM payments WHERE payment_no = ?`, paymentNo).
-		Scan(&p.PaymentNo, &p.OrderID, &p.UserID, &p.Amount, &p.Currency, &p.Method,
-			&p.Status, &tradeNo, &callbackAt, &p.CreatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
+	var row paymentRow
+	err := m.db.WithContext(ctx).Where("payment_no = ?", paymentNo).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("query payment: %w", err)
 	}
-	if tradeNo.Valid {
-		p.ProviderTradeNo = tradeNo.String
-	}
-	if callbackAt.Valid {
-		p.CallbackAt = callbackAt.Time
-	}
-	return p, nil
+	return row.toModel(), nil
 }
 
 func (m *MySQL) getPaymentByOrder(ctx context.Context, orderID string) (*model.Payment, error) {
-	var paymentNo string
-	err := m.db.QueryRowContext(ctx, "SELECT payment_no FROM payments WHERE order_id = ?", orderID).
-		Scan(&paymentNo)
-	if errors.Is(err, sql.ErrNoRows) {
+	var row paymentRow
+	err := m.db.WithContext(ctx).Where("order_id = ?", orderID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("query payment by order: %w", err)
 	}
-	return m.GetPayment(ctx, paymentNo)
+	return row.toModel(), nil
+}
+
+func (r paymentRow) toModel() *model.Payment {
+	payment := &model.Payment{
+		PaymentNo: r.PaymentNo,
+		OrderID:   r.OrderID,
+		UserID:    r.UserID,
+		Amount:    r.Amount,
+		Currency:  r.Currency,
+		Method:    r.Method,
+		Status:    r.Status,
+		CreatedAt: r.CreatedAt,
+	}
+	if r.ProviderTradeNo != nil {
+		payment.ProviderTradeNo = *r.ProviderTradeNo
+	}
+	if r.CallbackAt != nil {
+		payment.CallbackAt = *r.CallbackAt
+	}
+	return payment
 }
 
 func (m *MySQL) ApplyCallback(ctx context.Context, paymentNo, tradeNo, target string, at time.Time, traceID string) (*model.Payment, error) {
 	// 在同一事务中用行锁读取状态、校验转换、更新支付并插入成功事件，提交时原子生效。
-	tx, err := m.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("begin callback transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	p := new(model.Payment)
-	err = tx.QueryRowContext(ctx, `SELECT payment_no, order_id, user_id, amount, currency,
-		method, status FROM payments WHERE payment_no = ? FOR UPDATE`, paymentNo).
-		Scan(&p.PaymentNo, &p.OrderID, &p.UserID, &p.Amount, &p.Currency, &p.Method, &p.Status)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("lock payment: %w", err)
-	}
-	if !model.CanTransition(p.Status, target) {
-		return nil, model.ErrInvalidTransition
-	}
-	if p.Status != target {
-		_, err = tx.ExecContext(ctx, `UPDATE payments SET status = ?, provider_trade_no = ?,
-			callback_at = ? WHERE payment_no = ?`, target, tradeNo, at, paymentNo)
+	err := m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var row paymentRow
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("payment_no = ?", paymentNo).First(&row).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotFound
+		}
 		if err != nil {
-			return nil, fmt.Errorf("update payment callback: %w", err)
+			return fmt.Errorf("lock payment: %w", err)
+		}
+		if !model.CanTransition(row.Status, target) {
+			return model.ErrInvalidTransition
+		}
+		if row.Status == target {
+			return nil
+		}
+
+		updates := map[string]interface{}{
+			"status":            target,
+			"provider_trade_no": tradeNo,
+			"callback_at":       at,
+		}
+		if err := tx.Model(&paymentRow{}).Where("payment_no = ?", paymentNo).Updates(updates).Error; err != nil {
+			return fmt.Errorf("update payment callback: %w", err)
 		}
 		if target == model.StatusSuccess {
 			event := model.OrderPaidEvent{
-				EventID: paymentNo + ":paid", PaymentNo: paymentNo, OrderID: p.OrderID,
-				UserID: p.UserID, Amount: p.Amount, Currency: p.Currency, PaidAt: at, TraceID: traceID,
+				EventID: paymentNo + ":paid", PaymentNo: paymentNo, OrderID: row.OrderID,
+				UserID: row.UserID, Amount: row.Amount, Currency: row.Currency, PaidAt: at, TraceID: traceID,
 			}
-			payload, marshalErr := json.Marshal(event)
-			if marshalErr != nil {
-				return nil, fmt.Errorf("encode paid event: %w", marshalErr)
-			}
-			_, err = tx.ExecContext(ctx, `INSERT INTO payment_outbox (event_key, payment_no, payload)
-				VALUES (?, ?, ?)`, event.EventID, paymentNo, payload)
+			payload, err := json.Marshal(event)
 			if err != nil {
-				return nil, fmt.Errorf("insert payment outbox: %w", err)
+				return fmt.Errorf("encode paid event: %w", err)
+			}
+			outbox := outboxRow{
+				EventKey: event.EventID, PaymentNo: paymentNo,
+				Payload: payload, Status: "pending",
+			}
+			if err := tx.Create(&outbox).Error; err != nil {
+				return fmt.Errorf("insert payment outbox: %w", err)
 			}
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit callback transaction: %w", err)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("apply payment callback: %w", err)
 	}
 	return m.GetPayment(ctx, paymentNo)
 }
 
 func (m *MySQL) ClaimOutbox(ctx context.Context) (*model.OutboxMessage, error) {
 	// SKIP LOCKED 跳过其他 Worker 正在处理的行，并用随机 claim token 防止旧租约修改新租约。
-	tx, err := m.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("begin outbox claim: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	var message model.OutboxMessage
+	err := m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var row outboxRow
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+			Where("status = ? OR (status = ? AND claimed_until < ?)",
+				"pending", "processing", gorm.Expr("UTC_TIMESTAMP(3)")).
+			Order("id ASC").First(&row).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("select outbox event: %w", err)
+		}
 
-	message := new(model.OutboxMessage)
-	err = tx.QueryRowContext(ctx, `SELECT id, event_key, payload FROM payment_outbox
-		WHERE status = 'pending' OR (status = 'processing' AND claimed_until < UTC_TIMESTAMP(3))
-		ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED`).
-		Scan(&message.ID, &message.EventKey, &message.Payload)
-	if errors.Is(err, sql.ErrNoRows) {
+		message = model.OutboxMessage{
+			ID: row.ID, EventKey: row.EventKey, Payload: row.Payload,
+			ClaimToken: strings.ReplaceAll(uuid.NewString(), "-", ""),
+		}
+		result := tx.Model(&outboxRow{}).Where("id = ?", row.ID).Updates(map[string]interface{}{
+			"status":        "processing",
+			"claim_token":   message.ClaimToken,
+			"claimed_until": gorm.Expr("UTC_TIMESTAMP(3) + INTERVAL 30 SECOND"),
+		})
+		if result.Error != nil {
+			return fmt.Errorf("claim outbox event: %w", result.Error)
+		}
+		return requireAffectedRow(result, "claim outbox event")
+	})
+	if err != nil {
+		return nil, fmt.Errorf("claim outbox message: %w", err)
+	}
+	if message.ID == 0 {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("select outbox event: %w", err)
-	}
-	message.ClaimToken = strings.ReplaceAll(uuid.NewString(), "-", "")
-	_, err = tx.ExecContext(ctx, `UPDATE payment_outbox SET status = 'processing',
-		claim_token = ?, claimed_until = UTC_TIMESTAMP(3) + INTERVAL 30 SECOND WHERE id = ?`,
-		message.ClaimToken, message.ID)
-	if err != nil {
-		return nil, fmt.Errorf("claim outbox event: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit outbox claim: %w", err)
-	}
-	return message, nil
+	return &message, nil
 }
 
 func (m *MySQL) MarkOutboxQueued(ctx context.Context, message *model.OutboxMessage) error {
 	// 只有持有当前 claim token 的 Worker 可以把租约记录标记为 queued。
-	result, err := m.db.ExecContext(ctx, `UPDATE payment_outbox SET status = 'queued',
-		queued_at = UTC_TIMESTAMP(3), claimed_until = NULL WHERE id = ? AND claim_token = ?`,
-		message.ID, message.ClaimToken)
-	if err != nil {
-		return fmt.Errorf("mark outbox queued: %w", err)
+	result := m.db.WithContext(ctx).Model(&outboxRow{}).
+		Where("id = ? AND claim_token = ?", message.ID, message.ClaimToken).
+		Updates(map[string]interface{}{
+			"status":        "queued",
+			"queued_at":     gorm.Expr("UTC_TIMESTAMP(3)"),
+			"claimed_until": nil,
+		})
+	if result.Error != nil {
+		return fmt.Errorf("mark outbox queued: %w", result.Error)
 	}
 	return requireAffectedRow(result, "mark outbox queued")
 }
 
 func (m *MySQL) MarkOutboxDead(ctx context.Context, eventKey string, cause error) error {
 	// 重试耗尽后保留失败原因并进入 dead 状态，等待人工核对后补偿重放。
-	reason := cause.Error()
-	if len(reason) > 500 {
-		reason = reason[:500]
-	}
-	result, err := m.db.ExecContext(ctx, `UPDATE payment_outbox SET status = 'dead',
-		attempts = attempts + 1, last_error = ?, claimed_until = NULL WHERE event_key = ?`,
-		reason, eventKey)
-	if err != nil {
-		return fmt.Errorf("mark outbox event dead: %w", err)
+	reason := truncateError(cause)
+	result := m.db.WithContext(ctx).Model(&outboxRow{}).Where("event_key = ?", eventKey).
+		Updates(map[string]interface{}{
+			"status":        "dead",
+			"attempts":      gorm.Expr("attempts + ?", 1),
+			"last_error":    reason,
+			"claimed_until": nil,
+		})
+	if result.Error != nil {
+		return fmt.Errorf("mark outbox event dead: %w", result.Error)
 	}
 	return requireAffectedRow(result, "mark outbox event dead")
 }
 
 func (m *MySQL) ReleaseOutbox(ctx context.Context, message *model.OutboxMessage, cause error) error {
 	// 入队失败时回滚 outbox 租约并保留截断后的错误原因，供再次 claim。
-	reason := cause.Error()
-	if len(reason) > 500 {
-		reason = reason[:500]
-	}
-	result, err := m.db.ExecContext(ctx, `UPDATE payment_outbox SET status = 'pending',
-		attempts = attempts + 1, last_error = ?, claimed_until = NULL WHERE id = ? AND claim_token = ?`,
-		reason, message.ID, message.ClaimToken)
-	if err != nil {
-		return fmt.Errorf("release outbox event: %w", err)
+	result := m.db.WithContext(ctx).Model(&outboxRow{}).
+		Where("id = ? AND claim_token = ?", message.ID, message.ClaimToken).
+		Updates(map[string]interface{}{
+			"status":        "pending",
+			"attempts":      gorm.Expr("attempts + ?", 1),
+			"last_error":    truncateError(cause),
+			"claimed_until": nil,
+		})
+	if result.Error != nil {
+		return fmt.Errorf("release outbox event: %w", result.Error)
 	}
 	return requireAffectedRow(result, "release outbox event")
 }
 
-func requireAffectedRow(result sql.Result, operation string) error {
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("%s affected rows: %w", operation, err)
+func truncateError(cause error) string {
+	reason := cause.Error()
+	if len(reason) > 500 {
+		return reason[:500]
 	}
-	if rows != 1 {
-		return fmt.Errorf("%s: expected one row, updated %d", operation, rows)
+	return reason
+}
+
+func requireAffectedRow(result *gorm.DB, operation string) error {
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("%s: expected one row, updated %d", operation, result.RowsAffected)
 	}
 	return nil
 }

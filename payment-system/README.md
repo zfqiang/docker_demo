@@ -17,14 +17,14 @@ Vue ──JWT──> payment-api (go-zero REST)
                                   order-service notification
 ```
 
-| 模块                                 | 职责                                     | Go 面试高频点                              |
-| ------------------------------------ | ---------------------------------------- | ------------------------------------------ |
-| `api/`、`internal/handler`           | REST DTO、JWT、CORS、统一错误响应        | HTTP 中间件、鉴权与资源归属校验、API 设计  |
-| `internal/service`                   | 支付用例、状态机、回调锁                 | 状态机、不变量、幂等、分布式锁租约与误删锁 |
-| `internal/repository`、`migrations/` | SQL、事务、唯一约束、outbox              | 事务隔离、行锁、索引、事务消息/Outbox      |
-| `internal/queue`、`cmd/worker`       | Outbox 投递、Asynq 重试、死信队列        | 至少一次投递、幂等消费、退避与死信         |
-| `internal/channel`                   | 支付渠道适配和回调 HMAC 验签             | 接口抽象、常量时间比较、外部系统边界       |
-| `rpc/payment.proto`                  | 支付服务对订单/用户等服务暴露的 RPC 契约 | Protobuf、服务边界、向后兼容               |
+| 模块                                 | 职责                                            | Go 面试高频点                              |
+| ------------------------------------ | ----------------------------------------------- | ------------------------------------------ |
+| `api/`、`internal/handler`           | REST DTO、JWT、CORS、统一错误响应               | HTTP 中间件、鉴权与资源归属校验、API 设计  |
+| `internal/service`                   | 支付用例、状态机、回调锁                        | 状态机、不变量、幂等、分布式锁租约与误删锁 |
+| `internal/repository`、`migrations/` | GORM 数据访问、SQL 迁移、事务、唯一约束、outbox | 事务隔离、行锁、索引、事务消息/Outbox      |
+| `internal/queue`、`cmd/worker`       | Outbox 投递、Asynq 重试、死信队列               | 至少一次投递、幂等消费、退避与死信         |
+| `internal/channel`                   | 支付渠道适配和回调 HMAC 验签                    | 接口抽象、常量时间比较、外部系统边界       |
+| `rpc/payment.proto`                  | 支付服务对订单/用户等服务暴露的 RPC 契约        | Protobuf、服务边界、向后兼容               |
 
 `rpc/payment.proto` 是支付服务的 go-zero zrpc 契约，`rpc/order.proto` 定义下单校验和订单支付成功通知的订单服务边界；服务 API 的 goctl 定义见 `api/payment.api`。用户身份由用户/认证服务签发 JWT，支付服务验签并从 token 获取用户 ID，不信任请求体中的用户 ID。当前本地可执行闭环以 REST + Worker 为主，避免依赖未生成的 protobuf 代码和外部订单服务。生产接入时分别用 goctl 生成支付与订单 RPC 桩，并将创建支付前的订单归属/金额核验接入 `GetPayableOrder`。
 
@@ -59,6 +59,22 @@ go run .\cmd\worker
 Docker Desktop 在 Windows 上通常使用 Linux 容器。Compose 的相对挂载（如 `./migrations/001_init.sql`）由 Compose 根据 `docker-compose.yml` 所在目录解析；不要将 Windows 反斜杠路径写进 YAML，也不要把 `D:\...` 作为 Linux 容器内路径。遇到挂载失败时检查 Docker Desktop 的目录共享权限，且避免将项目放在权限受限或同步软件实时锁定的目录。开发热重载可再挂载源码，但不要挂载宿主机 `vendor` 或 Windows 构建出的可执行文件覆盖 Linux 容器文件。
 
 ## API 使用
+
+完整 OpenAPI 3.1 接口规范位于 [`openapi.yaml`](openapi.yaml)，可导入 Swagger UI、Postman 或其他兼容工具。规范包含请求参数、JWT 鉴权、回调 HMAC 签名、统一响应和各业务错误码。
+
+项目已通过 Docker Compose 集成 Swagger UI：
+
+```powershell
+docker compose up --build
+```
+
+访问 `http://localhost:8082/docs` 查看接口文档并调用 API。Swagger UI 挂载项目根目录的 [`openapi.yaml`](openapi.yaml)，修改规范文件后刷新页面即可生效，不需要维护生成副本。
+
+仅启动文档工具时，也可使用：
+
+```powershell
+docker run --rm -p 8082:8080 -e SWAGGER_JSON=/spec/openapi.yaml -v "${PWD}/openapi.yaml:/spec/openapi.yaml:ro" swaggerapi/swagger-ui
+```
 
 默认开发密钥仅用于本机。Compose 中务必替换 `JWT_SECRET` 和 `CALLBACK_SECRET`，勿将其用于线上。生成 24 小时开发 JWT：
 

@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 	"github.com/zeromicro/go-zero/core/logx"
 	"github.com/zeromicro/go-zero/rest"
@@ -20,6 +22,12 @@ import (
 )
 
 func main() {
+
+	// 容器环境由 Compose 注入；本地运行时可选加载工作目录中的 .env 文件。
+	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
+		log.Fatalf("load .env file: %v", err)
+	}
+
 	// Load 从环境变量读取运行配置；开发环境会使用 config.go 中的安全性较低的默认值。
 	cfg := config.Load()
 	// startup 上下文只用于启动阶段的依赖探测，超时后会同时取消其中的数据库和 Redis 操作。
